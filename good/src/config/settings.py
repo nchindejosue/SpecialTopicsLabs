@@ -1,0 +1,25 @@
+ # --- Constants ---
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 600
+TITLE = "Car Game (Tkinter)"
+BACKGROUND_COLOR = "#404040"  # Darker gray for the road
+LANE_COLOR = "white"
+PLAYER_CAR_COLOR = "blue"
+OBSTACLE_CAR_COLOR = "red"
+SCORE_COLOR = "white"
+GAMEOVER_COLOR = "yellow"
+# Game settings
+LANE_COUNT = 3
+LANE_WIDTH = 100
+ROAD_WIDTH = LANE_COUNT * LANE_WIDTH
+LANE_MARKER_HEIGHT = 20
+LANE_MARKER_GAP = 20
+PLAYER_CAR_WIDTH = 50
+PLAYER_CAR_HEIGHT = 80
+OBSTACLE_WIDTH = 50
+OBSTACLE_HEIGHT = 80
+INITIAL_OBSTACLE_SPEED = 5
+SPEED_INCREASE_RATE = 0.5 # Speed increases by this much
+SCORE_TO_INCREASE_SPEED = 5 # Increase speed every 5 points
+SPAWN_INTERVAL_MS = 1500 # Spawn a new obstacle every 1.5 seconds
+GAME_UPDATE_MS = 16 # Roughly 60 FPS

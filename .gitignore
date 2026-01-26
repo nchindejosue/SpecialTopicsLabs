@@ -1,1 +1,9 @@
 setup_labs.py
+codebase_context.txt
+lab14_capstone/.env
+lab14_capstone/contex.py
+lab14_capstone/context.py
+lab14_capstone/figma_sample.json
+*.db
+__pycache__/
+.marvelcode/

@@ -9,6 +9,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.ui.styles import DeepBlueTheme
 from app.ui.editor import CodeEditor
+from app.core.security.database import SecurityDB
+from app.core.settings import SettingsHandler
+from app.core.ai_engine.ai_engine import CeilAIEngine
+from app.core.compiler.lexer import CeilLexer
+from app.core.compiler.parser import CeilParser
+from app.core.security.security import SecurityEngine
+from app.core.executor.executor import CeilExecutor
+from app.core.chat_manager import ChatManager
+import threading
+import time
+import subprocess
+import queue
 
 class SecureIDE(tk.Tk):
     def __init__(self):
@@ -21,12 +33,32 @@ class SecureIDE(tk.Tk):
         self.current_file = None
         self.mention_popup = None
         self.all_project_items = [] 
+        self.recursion_depth = 0
+        self.current_user = None
+        self.current_user_role = None
+        self.pending_instructions = None # Mission 3: Staging Area
+        self.terminal_tabs = {} # Store terminal objects
+        self.active_terminal_id = None
+        self.chat_manager = None
+        self.active_chat_id = "default"
+        self.is_ai_processing = False
+        self.timer_line_index = None
+        
+        self.db = SecurityDB()
+        self.lexer = CeilLexer()
+        self.parser = CeilParser()
+        self.sec = SecurityEngine(self.project_path or ".")
+        self.exe = CeilExecutor(self.project_path or ".")
+        self.ai = CeilAIEngine()
         
         self.configure_styles()
         self.create_menu()
         self.setup_layout()
         
         self.editor.bind("<KeyRelease>", self.auto_save)
+        
+        self.withdraw() # Hide until login
+        self.perform_login()
         
         self.log("System Ready. Type '@' for Context Palette.", "SYSTEM")
 
@@ -58,7 +90,7 @@ class SecureIDE(tk.Tk):
         self.config(menu=menubar)
 
     def setup_layout(self):
-        self.main_split = tk.PanedWindow(self, orient=tk.HORIZONTAL, bg=DeepBlueTheme.BORDER, sashwidth=3, sashrelief="flat")
+        self.main_split = tk.PanedWindow(self, orient=tk.HORIZONTAL, bg=DeepBlueTheme.BG_SIDEBAR, sashwidth=3, sashrelief="flat")
         self.main_split.pack(fill=tk.BOTH, expand=True)
 
         # === LEFT SIDEBAR ===
@@ -107,11 +139,11 @@ class SecureIDE(tk.Tk):
         self.main_split.add(self.sidebar_frame, width=280)
 
         # === CENTER WORK AREA ===
-        self.work_split = tk.PanedWindow(self.main_split, orient=tk.HORIZONTAL, bg=DeepBlueTheme.BORDER, sashwidth=3)
+        self.work_split = tk.PanedWindow(self.main_split, orient=tk.HORIZONTAL, bg=DeepBlueTheme.BG_MAIN, sashwidth=3)
         self.main_split.add(self.work_split)
 
         self.center_frame = tk.Frame(self.work_split, bg=DeepBlueTheme.BG_MAIN)
-        self.center_split = tk.PanedWindow(self.center_frame, orient=tk.VERTICAL, bg=DeepBlueTheme.BORDER, sashwidth=3)
+        self.center_split = tk.PanedWindow(self.center_frame, orient=tk.VERTICAL, bg=DeepBlueTheme.BG_MAIN, sashwidth=3)
         self.center_split.pack(fill=tk.BOTH, expand=True)
 
         # Editor
@@ -123,34 +155,71 @@ class SecureIDE(tk.Tk):
         self.editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.center_split.add(self.editor_container, height=500)
 
-        # Terminal
+        # Multi-Terminal Container
         self.term_container = tk.Frame(self.center_split, bg=DeepBlueTheme.BG_TERMINAL)
-        self.lbl_term = tk.Label(self.term_container, text=" TERMINAL / LOGS", bg=DeepBlueTheme.BG_TERMINAL, fg="#00ff00", anchor="w", font=("Consolas", 9))
-        self.lbl_term.pack(fill=tk.X)
-        self.term_scroll = ttk.Scrollbar(self.term_container, orient="vertical")
-        self.terminal = tk.Text(self.term_container, bg=DeepBlueTheme.BG_TERMINAL, fg="#94a3b8", 
-                                font=("Consolas", 10), relief="flat", padx=10, pady=5,
-                                yscrollcommand=self.term_scroll.set)
-        self.term_scroll.config(command=self.terminal.yview)
-        self.terminal.tag_config("SYSTEM", foreground="#38bdf8")
-        self.terminal.tag_config("AI_OP", foreground="#a78bfa")
-        self.terminal.tag_config("SUCCESS", foreground="#4ade80")
-        self.terminal.tag_config("ERROR", foreground="#f44336")
-        self.term_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.terminal.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.center_split.add(self.term_container, height=200)
+        
+        # Terminal Header with Tabs and + Button
+        self.term_header = tk.Frame(self.term_container, bg="#1e293b", height=30)
+        self.term_header.pack(fill=tk.X)
+        
+        self.term_tabs_frame = tk.Frame(self.term_header, bg="#1e293b")
+        self.term_tabs_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        self.btn_add_term = tk.Button(self.term_header, text=" + ", command=self.add_terminal_tab,
+                                     bg="#334155", fg="white", bd=0, font=("Segoe UI", 10, "bold"), cursor="hand2")
+        self.btn_add_term.pack(side=tk.RIGHT, padx=5, pady=2)
+
+        # Content Area for Terminals
+        self.term_content = tk.Frame(self.term_container, bg=DeepBlueTheme.BG_TERMINAL)
+        self.term_content.pack(fill=tk.BOTH, expand=True)
+
+        self.center_split.add(self.term_container, height=300)
+
+        # Initialize First System Log Terminal
+        self.add_terminal_tab(name="SYSTEM LOGS", is_system=True)
 
         self.work_split.add(self.center_frame, width=700)
 
         # === RIGHT CHAT ===
         self.chat_frame = tk.Frame(self.work_split, bg=DeepBlueTheme.BG_CHAT)
-        self.lbl_chat = tk.Label(self.chat_frame, text=" AI ARCHITECT", bg=DeepBlueTheme.BG_CHAT, fg="#94a3b8", font=("Segoe UI", 9, "bold"), anchor="w")
-        self.lbl_chat.pack(fill=tk.X, pady=5, padx=5)
+        
+        # Chat Header (Title + Controls)
+        self.chat_header_frame = tk.Frame(self.chat_frame, bg=DeepBlueTheme.BG_CHAT)
+        self.chat_header_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        self.chat_history = tk.Text(self.chat_frame, bg=DeepBlueTheme.BG_CHAT, fg=DeepBlueTheme.FG_TEXT, font=("Segoe UI", 10), state="disabled", wrap="word", relief="flat", padx=10)
+        self.lbl_chat = tk.Label(self.chat_header_frame, text=" AI ARCHITECT", bg=DeepBlueTheme.BG_CHAT, fg="#94a3b8", font=("Segoe UI", 9, "bold"), anchor="w")
+        self.lbl_chat.pack(side=tk.LEFT)
+
+        # Chat Switcher
+        self.chat_selector = ttk.Combobox(self.chat_header_frame, state="readonly", width=15)
+        self.chat_selector.pack(side=tk.LEFT, padx=5)
+        self.chat_selector.bind("<<ComboboxSelected>>", self.on_chat_selected)
+
+        # Chat Actions
+        self.btn_new_chat = tk.Button(self.chat_header_frame, text="+", command=self.create_new_chat,
+                                     bg="#334155", fg="white", bd=0, font=("Segoe UI", 9, "bold"), width=2, cursor="hand2")
+        self.btn_new_chat.pack(side=tk.RIGHT, padx=2)
+        
+        self.btn_ren_chat = tk.Button(self.chat_header_frame, text="✎", command=self.rename_current_chat,
+                                     bg="#334155", fg="white", bd=0, font=("Segoe UI", 9, "bold"), width=2, cursor="hand2")
+        self.btn_ren_chat.pack(side=tk.RIGHT, padx=2)
+
+        # Chat History with Scrollbar
+        chat_scroll_frame = tk.Frame(self.chat_frame, bg=DeepBlueTheme.BG_CHAT)
+        chat_scroll_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.chat_history = tk.Text(chat_scroll_frame, bg=DeepBlueTheme.BG_CHAT, fg=DeepBlueTheme.FG_TEXT, 
+                                   font=("Segoe UI", 10), state="disabled", wrap="word", relief="flat", padx=10)
         self.chat_history.tag_config("USER", foreground="#38bdf8", justify="right")
         self.chat_history.tag_config("AI", foreground="#e2e8f0", justify="left")
-        self.chat_history.pack(fill=tk.BOTH, expand=True)
+        self.chat_history.tag_config("PLAN", foreground="#a78bfa", justify="left")
+        
+        self.chat_history.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # FIX: Ensure scrollbar is correctly linked to the text widget
+        self.chat_scroll = ttk.Scrollbar(chat_scroll_frame, orient="vertical", command=self.chat_history.yview)
+        self.chat_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.chat_history.configure(yscrollcommand=self.chat_scroll.set)
 
         # Chat Controls
         self.chat_ctrl_frame = tk.Frame(self.chat_frame, bg="#334155")
@@ -169,18 +238,316 @@ class SecureIDE(tk.Tk):
                                   bg=DeepBlueTheme.ACCENT, fg="white", font=("Segoe UI", 12), width=3, relief="flat", cursor="hand2")
         self.btn_send.pack(side=tk.RIGHT, padx=(5,5), pady=5)
 
+        # Mission 3: Confirm Button (Hidden by default)
+        self.btn_confirm = tk.Button(self.chat_frame, text="CONFIRM & EXECUTE", 
+                                    command=self.execute_pending, 
+                                    bg="#10b981", fg="white", font=("Segoe UI", 12, "bold"),
+                                    relief="flat", cursor="hand2")
+
         self.work_split.add(self.chat_frame, width=350)
 
+    # --- MULTI-TERMINAL SYSTEM ---
+    def add_terminal_tab(self, name=None, is_system=False):
+        term_id = len(self.terminal_tabs)
+        if name is None: name = f"PowerShell {term_id}"
+
+        # 1. Create Tab Button
+        btn_tab = tk.Button(self.term_tabs_frame, text=name, 
+                            command=lambda: self.switch_terminal(term_id),
+                            bg="#1e293b", fg="#94a3b8", bd=0, font=("Segoe UI", 9), padx=10)
+        btn_tab.pack(side=tk.LEFT, padx=1)
+
+        # 2. Create Terminal Frame (Stacked)
+        frame = tk.Frame(self.term_content, bg=DeepBlueTheme.BG_TERMINAL)
+        
+        # Scrollbar
+        scroll = ttk.Scrollbar(frame, orient="vertical")
+        
+        # Text Widget
+        text_widget = tk.Text(frame, bg=DeepBlueTheme.BG_TERMINAL, fg="#cbd5e1", 
+                              font=("Consolas", 10), relief="flat", padx=10, pady=5,
+                              yscrollcommand=scroll.set, insertbackground="white")
+        scroll.config(command=text_widget.yview)
+        
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Store Terminal Data
+        self.terminal_tabs[term_id] = {
+            "btn": btn_tab,
+            "frame": frame,
+            "text": text_widget,
+            "is_system": is_system,
+            "process": None,
+            "queue": queue.Queue()
+        }
+
+        # Configure Tags for System Terminal
+        if is_system:
+            text_widget.tag_config("SYSTEM", foreground="#38bdf8")
+            text_widget.tag_config("AI_OP", foreground="#a78bfa")
+            text_widget.tag_config("SUCCESS", foreground="#4ade80")
+            text_widget.tag_config("ERROR", foreground="#f44336")
+            text_widget.insert(tk.END, "MarvelCode System Log Initialized...\n", "SYSTEM")
+            text_widget.config(state="disabled") # System log is read-only
+        else:
+            # Interactive Shell Logic
+            self.start_powershell(term_id)
+            text_widget.bind("<Return>", lambda e: self.on_term_enter(e, term_id))
+
+        self.switch_terminal(term_id)
+
+    def switch_terminal(self, term_id):
+        # Hide all frames
+        for tid, data in self.terminal_tabs.items():
+            data['frame'].pack_forget()
+            data['btn'].config(bg="#1e293b", fg="#94a3b8") # Inactive style
+
+        # Show active frame
+        self.terminal_tabs[term_id]['frame'].pack(fill=tk.BOTH, expand=True)
+        self.terminal_tabs[term_id]['btn'].config(bg="#334155", fg="white") # Active style
+        self.active_terminal_id = term_id
+
+    def start_powershell(self, term_id):
+        """Starts a persistent PowerShell process for the terminal tab."""
+        def read_output(pipe, q):
+            for line in iter(pipe.readline, ''):
+                q.put(line)
+            pipe.close()
+
+        # Startupinfo to hide window
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        process = subprocess.Popen(
+            ["powershell", "-NoExit", "-Command", "-"], 
+            stdin=subprocess.PIPE, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            text=True, 
+            bufsize=1,
+            cwd=self.project_path or os.getcwd(),
+            startupinfo=startupinfo
+        )
+        
+        self.terminal_tabs[term_id]['process'] = process
+        
+        # Start reading threads
+        threading.Thread(target=read_output, args=(process.stdout, self.terminal_tabs[term_id]['queue']), daemon=True).start()
+        threading.Thread(target=read_output, args=(process.stderr, self.terminal_tabs[term_id]['queue']), daemon=True).start()
+
+        # Initial Prompt
+        self.terminal_tabs[term_id]['text'].insert(tk.END, f"PS {self.project_path or os.getcwd()}> ")
+        self.terminal_tabs[term_id]['text'].see(tk.END)
+
+        self.update_terminal_output(term_id)
+
+    def update_terminal_output(self, term_id):
+        """Polls the queue and updates the UI."""
+        if term_id not in self.terminal_tabs: return
+        
+        try:
+            while True:
+                line = self.terminal_tabs[term_id]['queue'].get_nowait()
+                self.terminal_tabs[term_id]['text'].insert(tk.END, line)
+                self.terminal_tabs[term_id]['text'].see(tk.END)
+        except queue.Empty:
+            pass
+        
+        self.after(50, lambda: self.update_terminal_output(term_id))
+
+    def on_term_enter(self, event, term_id):
+        """Handles command input in the interactive terminal."""
+        txt = self.terminal_tabs[term_id]['text']
+        # Get last line
+        content = txt.get("1.0", tk.END).strip()
+        lines = content.split("\n")
+        
+        # Simple extraction: assumes the last line is the command
+        # Better: find the last occurrence of "> "
+        last_line = lines[-1]
+        if "> " in last_line:
+            command = last_line.split("> ")[-1]
+        else:
+            command = last_line
+            
+        if not command: return "break"
+        
+        # Send to process
+        if self.terminal_tabs[term_id]['process']:
+            try:
+                # Chain a Write-Host to simulate prompt reappearance
+                full_cmd = f"{command}; Write-Host 'PS ' $PWD '> '"
+                self.terminal_tabs[term_id]['process'].stdin.write(full_cmd + "\n")
+                self.terminal_tabs[term_id]['process'].stdin.flush()
+                txt.insert(tk.END, "\n") # Visual newline
+            except Exception as e:
+                txt.insert(tk.END, f"\nError: {e}\n")
+        
+        return "break" # Prevent default newline insertion
+
     # --- HELPERS ---
+    def perform_login(self):
+        login_win = tk.Toplevel(self)
+        login_win.title("MarvelCode - Mission Control Login")
+        login_win.state('zoomed') # Mission 1: Professional Maximized State
+        login_win.configure(bg=DeepBlueTheme.BG_MAIN)
+        
+        # Centering container
+        center_frame = tk.Frame(login_win, bg=DeepBlueTheme.BG_MAIN)
+        center_frame.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
+        tk.Label(center_frame, text="MARVELCODE LOGIN", 
+                 bg=DeepBlueTheme.BG_MAIN, fg=DeepBlueTheme.FG_KEYWORD, 
+                 font=("Segoe UI", 24, "bold")).pack(pady=30)
+
+        tk.Label(center_frame, text="Username", bg=DeepBlueTheme.BG_MAIN, fg="#94a3b8", font=("Segoe UI", 14)).pack(pady=(10, 5))
+        user_ent = tk.Entry(center_frame, font=("Segoe UI", 14), width=30, bg="#334155", fg="white", insertbackground="white", relief="flat")
+        user_ent.pack(ipady=10)
+        
+        tk.Label(center_frame, text="Password", bg=DeepBlueTheme.BG_MAIN, fg="#94a3b8", font=("Segoe UI", 14)).pack(pady=(20, 5))
+        pass_ent = tk.Entry(center_frame, show="*", font=("Segoe UI", 14), width=30, bg="#334155", fg="white", insertbackground="white", relief="flat")
+        pass_ent.pack(ipady=10)
+        
+        def attempt_login(event=None):
+            u, p = user_ent.get(), pass_ent.get()
+            success, role = self.db.authenticate(u, p)
+            if success:
+                self.current_user = u
+                self.current_user_role = role
+                SettingsHandler.set("current_user", u) # Mission 1: Save State
+                
+                self.deiconify()
+                login_win.destroy()
+                self.log(f"Mission Control: {u} authenticated as {role}", "SUCCESS")
+                
+                # Mission 1: Auto-Mount
+                last_path = SettingsHandler.get("last_project_path")
+                if last_path and os.path.exists(last_path):
+                    self.auto_load_project(last_path)
+            else:
+                messagebox.showerror("Security Alert", "Invalid Credentials. Access Denied.")
+
+        btn_login = tk.Button(center_frame, text="AUTHORIZE ACCESS", command=attempt_login, 
+                              bg=DeepBlueTheme.ACCENT, fg="white", font=("Segoe UI", 14, "bold"), 
+                              width=25, relief="flat", cursor="hand2")
+        btn_login.pack(pady=40, ipady=10)
+        
+        login_win.bind("<Return>", attempt_login)
+        login_win.protocol("WM_DELETE_WINDOW", self.quit)
+
+    def auto_load_project(self, path):
+        self.project_path = path
+        # Initialize Chat Manager
+        self.chat_manager = ChatManager(path)
+        self.refresh_chat_selector()
+        
+        # Refresh components with new path
+        self.ai = CeilAIEngine()
+        self.sec = SecurityEngine(path)
+        self.exe = CeilExecutor(path)
+        self.populate_file_tree()
+        self.log(f"Auto-Mounting Workspace: {path}", "SUCCESS")
+        self.file_tree.heading("#0", text=f"PROJECT: {os.path.basename(path)}")
+
     def log(self, message, tag="SYSTEM"):
-        self.terminal.insert(tk.END, f">> {message}\n", tag)
-        self.terminal.see(tk.END)
+        if 0 not in self.terminal_tabs: return
+        
+        timestamp = time.strftime("%H:%M:%S")
+        text_widget = self.terminal_tabs[0]['text']
+        text_widget.config(state="normal")
+        text_widget.insert(tk.END, f"[{timestamp}] >> {message}\n", tag)
+        text_widget.config(state="disabled")
+        text_widget.see(tk.END)
+
+    def loop_timer(self, start_time, mode, start_ts):
+        if not self.is_ai_processing: return
+        elapsed = time.time() - start_time
+        self.update_timer_line(mode, elapsed, start_ts)
+        self.after(100, lambda: self.loop_timer(start_time, mode, start_ts))
+
+    def update_timer_line(self, mode, elapsed, start_ts, create=False, done=False):
+        if 0 not in self.terminal_tabs: return
+        txt = self.terminal_tabs[0]['text']
+        txt.config(state="normal")
+        
+        msg = f"[{start_ts}] >> --- Processing {mode.upper()} Request ({elapsed:.1f}s) ---"
+        if done: msg = f"[{start_ts}] >> --- Processing {mode.upper()} Request (COMPLETED in {elapsed:.1f}s) ---"
+
+        if create:
+            txt.insert(tk.END, msg + "\n", "SYSTEM")
+            self.timer_line_index = txt.index("end-2c linestart")
+        elif self.timer_line_index:
+            # Replace the specific line
+            line_start = self.timer_line_index
+            line_end = txt.index(f"{line_start} lineend")
+            txt.delete(line_start, line_end)
+            txt.insert(line_start, msg)
+            
+        txt.config(state="disabled")
+        txt.see(tk.END)
 
     def chat_bubble(self, sender, message):
         self.chat_history.config(state="normal")
+        if sender == "PLAN":
+            self.chat_history.tag_config("PLAN", foreground="#a78bfa", justify="left")
         self.chat_history.insert(tk.END, f"[{sender}]\n{message}\n\n", sender)
         self.chat_history.config(state="disabled")
         self.chat_history.see(tk.END)
+        
+        # Save to Chat Manager
+        if self.chat_manager:
+            self.chat_manager.add_message(self.active_chat_id, sender, message)
+
+    def refresh_chat_selector(self):
+        if not self.chat_manager: return
+        chats = self.chat_manager.chats["chats"]
+        chat_names = [f"{v['name']} ({k})" for k, v in chats.items()]
+        self.chat_selector['values'] = chat_names
+        
+        # Select active chat
+        active_id = self.chat_manager.chats["active_chat_id"]
+        active_name = chats.get(active_id, {}).get("name", "Unknown")
+        self.chat_selector.set(f"{active_name} ({active_id})")
+        self.active_chat_id = active_id
+        
+        self.load_chat_history(active_id)
+
+    def load_chat_history(self, chat_id):
+        self.chat_history.config(state="normal")
+        self.chat_history.delete("1.0", tk.END)
+        
+        history = self.chat_manager.get_history(chat_id)
+        for msg in history:
+            sender = msg['sender']
+            message = msg['message']
+            self.chat_history.insert(tk.END, f"[{sender}]\n{message}\n\n", sender)
+            
+        self.chat_history.config(state="disabled")
+        self.chat_history.see(tk.END)
+
+    def on_chat_selected(self, event):
+        selection = self.chat_selector.get()
+        # Extract ID from "Name (ID)"
+        chat_id = selection.split("(")[-1].strip(")")
+        self.active_chat_id = chat_id
+        self.chat_manager.chats["active_chat_id"] = chat_id
+        self.chat_manager.save_chats()
+        self.load_chat_history(chat_id)
+
+    def create_new_chat(self):
+        name = simpledialog.askstring("New Chat", "Enter chat name:")
+        if name:
+            new_id = f"chat_{int(time.time())}"
+            self.chat_manager.add_chat(new_id, name)
+            self.chat_manager.chats["active_chat_id"] = new_id
+            self.refresh_chat_selector()
+
+    def rename_current_chat(self):
+        new_name = simpledialog.askstring("Rename Chat", "Enter new name:")
+        if new_name:
+            self.chat_manager.rename_chat(self.active_chat_id, new_name)
+            self.refresh_chat_selector()
 
     def auto_save(self, event=None):
         if self.current_file and os.path.exists(self.current_file):
@@ -191,10 +558,154 @@ class SecureIDE(tk.Tk):
     def open_project(self):
         path = filedialog.askdirectory(title="Select Project Folder")
         if path:
-            self.project_path = path
-            self.populate_file_tree()
-            self.log(f"Workspace loaded: {path}", "SUCCESS")
-            self.file_tree.heading("#0", text=f"PROJECT: {os.path.basename(path)}")
+            SettingsHandler.set("last_project_path", path) # Mission 1: Persist Path
+            self.auto_load_project(path)
+
+    def process(self, mode, prompt):
+        start_time = time.time()
+        start_ts = time.strftime("%H:%M:%S")
+        self.is_ai_processing = True
+        
+        # Initial Timer Log (Thread-safe creation)
+        self.after(0, lambda: self.update_timer_line(mode, 0.0, start_ts, create=True))
+        # Start Timer Loop
+        self.after(100, lambda: self.loop_timer(start_time, mode, start_ts))
+
+        try:
+            self.btn_confirm.after(0, self.btn_confirm.pack_forget) # Thread-safe UI update
+            
+            # 1. AI Layer (Blocking call moved to thread)
+            history = self.chat_manager.get_history(self.active_chat_id)
+            
+            # Helper for thread-safe logging from within AI engine
+            def ai_log(msg, level="INFO"):
+                self.after(0, lambda: self.log(msg, level))
+
+            if mode == "figma":
+                self.after(0, lambda: self.log(f"Transpiling Figma Data...", "AI_OP"))
+                raw_response = self.ai.figma_to_ceil(prompt)
+            else:
+                raw_response = self.ai.generate_instructions(prompt, self.project_path, history=history, log_callback=ai_log)
+            
+            self.is_ai_processing = False # Stop Timer Loop
+            elapsed = time.time() - start_time
+            
+            # Finalize Timer Line
+            self.after(0, lambda: self.update_timer_line(mode, elapsed, start_ts, create=False, done=True))
+            self.after(0, lambda: self.log(f"AI Process Completed in {elapsed:.2f} seconds", "SUCCESS"))
+            
+            if "ERROR" in raw_response:
+                self.after(0, lambda: self.log(raw_response, "ERROR"))
+                self.after(0, lambda: self.chat_bubble("AI", f"⚠️ {raw_response}"))
+                return
+
+            # Mission 3: Logical Intent Differentiation & Parsing
+            chat_content = ""
+            plan_content = ""
+            ceil_content = ""
+
+            # Robust Parsing
+            parts = raw_response.split("COMMANDS")
+            non_command_part = parts[0]
+            if len(parts) > 1:
+                ceil_content = self.ai.clean_response(parts[1].strip())
+
+            plan_parts = non_command_part.split("PLAN")
+            chat_part = plan_parts[0]
+            if len(plan_parts) > 1:
+                plan_content = plan_parts[1].strip()
+
+            if "CHAT" in chat_part:
+                chat_content = chat_part.split("CHAT")[1].strip()
+            else:
+                chat_content = chat_part.strip()
+
+
+            # Update Chat UI (Thread-safe)
+            if chat_content:
+                # Remove artifacts like ": " if they remain
+                if chat_content.startswith(":"): chat_content = chat_content[1:].strip()
+                self.after(0, lambda: self.chat_bubble("AI", chat_content))
+            
+            if plan_content:
+                # Remove artifacts like ": " if they remain
+                if plan_content.startswith(":"): plan_content = plan_content[1:].strip()
+                self.after(0, lambda: self.chat_bubble("PLAN", f"📋 PROPOSED PLAN:\n{plan_content}"))
+            
+            if ceil_content:
+                self.pending_instructions = ceil_content
+                self.after(0, lambda: self.btn_confirm.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10))
+                # Only show the confirmation prompt if there are actual commands
+                self.after(0, lambda: self.chat_bubble("AI", "I have prepared the changes. Please review the plan above and click 'CONFIRM & EXECUTE' when ready."))
+            
+            # Fallback only if absolutely nothing was parsed and it wasn't empty
+            elif not chat_content and not plan_content and raw_response.strip():
+                 self.after(0, lambda: self.chat_bubble("AI", raw_response))
+
+        except Exception as e: 
+            self.after(0, lambda: self.log(f"Pipeline Fail: {e}"))
+            self.after(0, lambda: self.chat_bubble("AI", f"Critical Error: {e}"))
+
+    def execute_pending(self):
+        """Mission 3: The Execution Hook (Async)."""
+        if not self.pending_instructions:
+            return
+        
+        self.btn_confirm.pack_forget()
+        ceil = self.pending_instructions
+        self.pending_instructions = None
+        
+        # Run execution in background thread
+        threading.Thread(target=self._run_execution_thread, args=(ceil,), daemon=True).start()
+
+    def _run_execution_thread(self, ceil):
+        try:
+            self.after(0, lambda: self.log("Executing Authorized Instructions...", "SYSTEM"))
+            
+            # 2. Compiler
+            tokens = self.lexer.tokenize(ceil)
+            ast = self.parser.set_tokens(tokens).parse()
+            
+            # 3. Security
+            audited = self.sec.audit_ast(ast, self.current_user_role)
+            
+            # 4. Executor
+            # Handle FETCH_FIGMA specially before generic execution
+            for cmd in audited:
+                if cmd['type'] == 'FETCH_FIGMA':
+                    url = cmd['url']
+                    self.after(0, lambda: self.log(f"Fetching Design from Figma: {url}", "AI_OP"))
+                    figma_data = self.ai.fetch_figma_data(url)
+                    if "error" in figma_data:
+                        self.after(0, lambda: self.log(f"Figma Error: {figma_data['error']}", "ERROR"))
+                    else:
+                        self.after(0, lambda: self.log("Figma Data Retrieved. Processing with AI...", "SUCCESS"))
+                        # Recurse with figma data to generate code
+                        threading.Thread(target=self.process, args=("figma", str(figma_data)), daemon=True).start()
+                    return # Exit after triggering figma process
+            
+            res_list = self.exe.execute(audited)
+            
+            # 5. Receipt (Thread-safe updates)
+            for r in res_list: 
+                self.after(0, lambda msg=r: self.log(msg))
+            
+            success_count = len([r for r in res_list if "CREATED" in r or "PATCHED" in r or "DELETED" in r])
+            self.after(0, lambda: self.chat_bubble("AI", f"✅ Mission successful. {success_count} operations completed. See logs for details."))
+            
+            # Self-healing if needed
+            errors = [r for r in res_list if "ERROR" in r or "RUNTIME ERROR" in r]
+            if errors and self.recursion_depth < 3:
+                self.recursion_depth += 1
+                self.after(0, lambda: self.log(f"⚠️ Auto-Fixing: {len(errors)} errors found.", "AUTO-FIX"))
+                threading.Thread(target=self.process, args=("text", f"The execution failed with these errors: {errors}. Fix them."), daemon=True).start()
+            else:
+                self.recursion_depth = 0
+                self.after(100, lambda: self.after(0, self.populate_file_tree))
+
+        except Exception as e:
+            self.log(f"Execution Failed: {e}", "ERROR")
+            self.chat_bubble("AI", f"❌ Execution Failed: {e}")
 
     def populate_file_tree(self):
         self.file_tree.delete(*self.file_tree.get_children())
@@ -386,24 +897,15 @@ class SecureIDE(tk.Tk):
         self.send_to_ai()
         return "break"
 
-    def send_to_ai(self, event=None):
+    def send_to_ai(self):
         prompt = self.chat_input.get("1.0", tk.END).strip()
-        if not prompt: return
-        if not self.project_path: 
-            messagebox.showerror("Error", "Open a project first.")
-            return
-
+        if not prompt or not self.project_path: return
+        
         self.chat_input.delete("1.0", tk.END)
         self.chat_bubble("USER", prompt)
         
-        response_msg = "I'm generating instructions to update your codebase safely."
-        if "delete" in prompt.lower(): response_msg = "I'll prepare a delete operation for the compiler."
-        
-        self.after(500, lambda: self.chat_bubble("AI", response_msg))
-        self.log(f"AI: Reasoning about '{prompt}'...", "AI_OP")
-        self.after(800, lambda: self.log("COMPILER: Generating CEIL...", "SYSTEM"))
-        self.after(1200, lambda: self.log("SECURITY: Scanning AST for threats...", "SYSTEM"))
-        self.after(1600, lambda: self.log("SUCCESS: Safety check passed. Executing.", "SUCCESS"))
+        # Start async processing
+        threading.Thread(target=self.process, args=("text", prompt), daemon=True).start()
 
 if __name__ == "__main__":
     app = SecureIDE()

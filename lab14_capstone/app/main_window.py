@@ -25,9 +25,26 @@ import queue
 class SecureIDE(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Secure AI-Assisted Codebase Editor (Capstone v10.0)")
+        self.title("Marvel Code")
         self.geometry("1400x900")
         self.configure(bg=DeepBlueTheme.BG_MAIN)
+        
+        # Use a dark blue for the window title bar if the OS supports it
+        try:
+            from ctypes import windll, byref, sizeof, c_int
+            if sys.platform == "win32":
+                # Convert hex to color code (0x00BBGGRR)
+                # BG_MAIN is #0f172a -> R:0f, G:17, B:2a
+                # Windows wants 0x002a170f
+                COLOR = 0x002a170f 
+                HWND = windll.user32.GetParent(self.winfo_id())
+                # DWMWA_CAPTION_COLOR = 35 (Windows 11)
+                windll.dwmapi.DwmSetWindowAttribute(HWND, 35, byref(c_int(COLOR)), sizeof(c_int))
+                # DWMWA_TEXT_COLOR = 36 (Windows 11)
+                white = 0x00ffffff
+                windll.dwmapi.DwmSetWindowAttribute(HWND, 36, byref(c_int(white)), sizeof(c_int))
+        except Exception:
+            pass # Fallback for non-supported OS versions
         
         self.project_path = None
         self.current_file = None

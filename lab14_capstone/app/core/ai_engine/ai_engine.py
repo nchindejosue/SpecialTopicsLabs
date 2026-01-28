@@ -29,22 +29,35 @@ class CeilAIEngine:
             genai.configure(api_key=key)
             self.system_instruction = (
                 "You are MarvelCode, an elite AI Orchestrator with Full Project Vision.\n"
-                "You MUST strictly structure your response into these three sections:\n\n"
-                "1. CHAT: Any greetings, explanations, or conversational context.\n"
-                "2. PLAN: A high-level bulleted list of the steps you will take.\n"
-                "3. COMMANDS: The CEIL automation code. THIS IS MANDATORY for execution.\n\n"
+                "You MUST strictly follow these behavioral rules:\n\n"
+                "RULE 1: CASUAL VS ACTIONABLE\n"
+                "- If the user's prompt is a simple greeting (e.g., 'hello', 'hi'), respond ONLY in the CHAT section. DO NOT provide a PLAN or COMMANDS.\n"
+                "- If the user asks a question without requesting changes, respond ONLY in the CHAT section.\n"
+                "- If the user requests an action (building, fixing, or modifying code), follow the three-section structure below.\n\n"
+                "RULE 2: THREE-SECTION STRUCTURE (MANDATORY FOR ACTIONS)\n"
+                "1. CHAT: Brief explanation of what you are doing.\n"
+                "2. PLAN: A high-level bulleted list of steps.\n"
+                "3. COMMANDS: The CEIL automation code. THIS SECTION MUST NOT BE EMPTY IF THERE IS A TASK.\n\n"
+                "RULE 3: COMMANDS ARE THE ONLY TRIGGER\n"
+                "- The user can only execute your plan if you provide the COMMANDS section.\n"
+                "- If you tell the user 'Executing now' or 'Running script', you MUST include the actual CEIL command in the COMMANDS section.\n"
+                "- If there are NO commands, the 'Confirm & Execute' button will NEVER appear.\n"
+                "- Example: If you want to run main.py, you MUST write:\n"
+                "COMMANDS\n"
+                "RUN main.py <<<\n"
+                ">>>\n\n"
+                "RULE 4: DO NOT MIMIC UI MESSAGES\n"
+                "- DO NOT write 'I have prepared the changes' or 'click CONFIRM & EXECUTE'.\n"
+                "- The system UI adds these messages automatically IF you provide valid COMMANDS.\n"
+                "- Just provide the CHAT, PLAN, and COMMANDS sections.\n\n"
                 "CEIL SYNTAX RULES (STRICT):\n"
-                "- Every command MUST follow this exact format: VERB filename <<< CONTENT >>>\n"
-                "- The content MUST be wrapped in triple angle brackets <<< and >>>.\n"
-                "- Example: CREATE main.py <<< print('hello') >>>\n"
+                "- Format: VERB filename <<< CONTENT >>>\n"
                 "- Verbs: CREATE, PATCH, DELETE, RUN, FETCH_FIGMA.\n"
-                "- For PATCH, use: PATCH filename SEARCH <<< old >>> REPLACE <<< new >>>\n\n"
-                "ENTRY POINT RULE:\n"
-                "- When using the RUN command, ALWAYS target the main entry point of the application (e.g., main.py, app.py, or the primary script).\n"
-                "- If you create a new system, ensure you RUN the file that launches the entire thing.\n"
-                "- DEPENDENCIES: If you need to install libraries, use RUN pip install <library>. The executor is now smart enough to handle this.\n\n"
-                "NEVER omit the <<< >>> markers. NEVER use markdown code blocks inside COMMANDS.\n"
-                "If you are creating a file, provide the FULL file content."
+                "- For RUN: The 'filename' is the script to execute. NEVER write 'RUN python'.\n"
+                "- Correct RUN: RUN main.py <<< >>>\n"
+                "- Incorrect RUN: RUN python main.py <<< >>>\n"
+                "- Example: RUN main.py <<< >>> (Content can be empty for RUN).\n\n"
+                "NEVER use markdown code blocks inside COMMANDS."
             )
             self.model = genai.GenerativeModel(
                 'gemini-2.5-pro',
@@ -191,6 +204,9 @@ class CeilAIEngine:
         
         # Final pass: Standard cleaning logic
         text = final_text.replace("```ceil", "").replace("```", "").strip()
+        
+        # MISSION 4 FIX: Ensure RUN commands with empty content are preserved
+        # Sometimes AI writes 'RUN main.py <<<' and forgets '>>>' or writes 'RUN main.py' alone.
         lines = text.split('\n')
         clean_lines = []
         is_inside_block = False
@@ -198,6 +214,11 @@ class CeilAIEngine:
         for line in lines:
             stripped = line.strip()
             if not stripped and not is_inside_block: continue
+            
+            # Auto-fix RUN commands that are missing the block markers
+            if stripped.startswith("RUN ") and "<<<" not in stripped:
+                line = f"{stripped} <<< >>>"
+                stripped = line
             
             if "<<<" in stripped: is_inside_block = True
             
@@ -273,8 +294,25 @@ class CeilAIEngine:
                 
                 if not response or not response.text:
                     raise Exception("Empty response from AI")
+                
+                final_text = response.text
+                
+                # MISSION 4: AUTO-CORRECTION LOOP
+                # If the AI provided a PLAN but forgot the COMMANDS, we trigger a second hidden turn
+                # to get the commands before returning the response to the UI.
+                if "PLAN" in final_text and "COMMANDS" not in final_text:
+                    if log_callback: log_callback("AI omitted COMMANDS section. Triggering self-correction turn...", "SYSTEM")
+                    correction_prompt = (
+                        "You provided a PLAN but omitted the COMMANDS section. "
+                        "Please provide the COMMANDS section now using the CEIL syntax (CREATE, PATCH, DELETE, RUN, FETCH_FIGMA). "
+                        "Respond ONLY with the COMMANDS section."
+                    )
+                    correction_response = chat.send_message(correction_prompt)
+                    if correction_response and correction_response.text:
+                        final_text += f"\n\nCOMMANDS\n{correction_response.text}"
+                        if log_callback: log_callback("COMMANDS recovered via self-correction.", "SUCCESS")
                     
-                return response.text
+                return final_text
 
             except Exception as e:
                 if attempt < max_retries - 1:

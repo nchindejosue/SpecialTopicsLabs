@@ -223,25 +223,24 @@ class SecureIDE(tk.Tk):
 
         # Chat History with Scrollbar
         chat_scroll_frame = tk.Frame(self.chat_frame, bg=DeepBlueTheme.BG_CHAT)
-        chat_scroll_frame.pack(fill=tk.BOTH, expand=True)
-
+        
+        # Chat History Text
         self.chat_history = tk.Text(chat_scroll_frame, bg=DeepBlueTheme.BG_CHAT, fg=DeepBlueTheme.FG_TEXT, 
                                    font=("Segoe UI", 10), state="disabled", wrap="word", relief="flat", padx=10)
         self.chat_history.tag_config("USER", foreground="#38bdf8", justify="right")
         self.chat_history.tag_config("AI", foreground="#e2e8f0", justify="left")
         self.chat_history.tag_config("PLAN", foreground="#a78bfa", justify="left")
         
-        self.chat_history.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         # FIX: Ensure scrollbar is correctly linked to the text widget
         self.chat_scroll = ttk.Scrollbar(chat_scroll_frame, orient="vertical", command=self.chat_history.yview)
-        self.chat_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.chat_history.configure(yscrollcommand=self.chat_scroll.set)
+
+        self.chat_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.chat_history.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Chat Controls
         self.chat_ctrl_frame = tk.Frame(self.chat_frame, bg="#334155")
-        self.chat_ctrl_frame.pack(fill=tk.X, padx=10, pady=10)
-
+        
         self.btn_at = tk.Button(self.chat_ctrl_frame, text="@", command=self.show_mention_popup, 
                                 bg=DeepBlueTheme.ACCENT, fg="white", font=("Consolas", 11, "bold"), width=3, relief="flat", cursor="hand2")
         self.btn_at.pack(side=tk.LEFT, padx=(5,5))
@@ -255,11 +254,20 @@ class SecureIDE(tk.Tk):
                                   bg=DeepBlueTheme.ACCENT, fg="white", font=("Segoe UI", 12), width=3, relief="flat", cursor="hand2")
         self.btn_send.pack(side=tk.RIGHT, padx=(5,5), pady=5)
 
-        # Mission 3: Confirm Button (Hidden by default)
-        self.btn_confirm = tk.Button(self.chat_frame, text="CONFIRM & EXECUTE", 
+        # Mission 3: Dedicated Staging Area for Confirm Button
+        # Using a dedicated frame ensures the button doesn't get pushed out of view
+        self.staging_frame = tk.Frame(self.chat_frame, bg=DeepBlueTheme.BG_CHAT)
+        self.btn_confirm = tk.Button(self.staging_frame, text="CONFIRM & EXECUTE", 
                                     command=self.execute_pending, 
                                     bg="#10b981", fg="white", font=("Segoe UI", 12, "bold"),
                                     relief="flat", cursor="hand2")
+        # Note: btn_confirm is NOT packed yet, staging_frame is packed in REFINED PACKING ORDER
+
+        # --- REFINED PACKING ORDER FOR VISIBILITY ---
+        self.chat_header_frame.pack(fill=tk.X, padx=5, pady=5) # 1. Top
+        self.chat_ctrl_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10) # 2. Bottom
+        self.staging_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10) # 3. Above Input
+        chat_scroll_frame.pack(fill=tk.BOTH, expand=True) # 4. Fill middle
 
         self.work_split.add(self.chat_frame, width=350)
 
@@ -594,16 +602,25 @@ class SecureIDE(tk.Tk):
             # 1. AI Layer (Blocking call moved to thread)
             history = self.chat_manager.get_history(self.active_chat_id)
             
+            # Mission 3: Robust Header Normalization
+            # Sometimes AI adds markdown or brackets to headers. We normalize them for easier splitting.
+            def normalize_headers(text):
+                text = text.replace("[PLAN]", "PLAN").replace("### PLAN", "PLAN")
+                text = text.replace("[COMMANDS]", "COMMANDS").replace("### COMMANDS", "COMMANDS")
+                text = text.replace("[CHAT]", "CHAT").replace("### CHAT", "CHAT")
+                return text
+
             # Helper for thread-safe logging from within AI engine
             def ai_log(msg, level="INFO"):
                 self.after(0, lambda: self.log(msg, level))
-
+            
             if mode == "figma":
                 self.after(0, lambda: self.log(f"Transpiling Figma Data...", "AI_OP"))
                 raw_response = self.ai.figma_to_ceil(prompt)
             else:
                 raw_response = self.ai.generate_instructions(prompt, self.project_path, history=history, log_callback=ai_log)
             
+            raw_response = normalize_headers(raw_response)
             self.is_ai_processing = False # Stop Timer Loop
             elapsed = time.time() - start_time
             
@@ -622,10 +639,12 @@ class SecureIDE(tk.Tk):
             ceil_content = ""
 
             # Robust Parsing
+            # Mission 3: Use the last COMMANDS section in case the AI mentioned it earlier in text
             parts = raw_response.split("COMMANDS")
             non_command_part = parts[0]
             if len(parts) > 1:
-                ceil_content = self.ai.clean_response(parts[1].strip())
+                # Take the last part as the command block
+                ceil_content = self.ai.clean_response(parts[-1].strip())
 
             plan_parts = non_command_part.split("PLAN")
             chat_part = plan_parts[0]
@@ -648,10 +667,15 @@ class SecureIDE(tk.Tk):
                 # Remove artifacts like ": " if they remain
                 if plan_content.startswith(":"): plan_content = plan_content[1:].strip()
                 self.after(0, lambda: self.chat_bubble("PLAN", f"📋 PROPOSED PLAN:\n{plan_content}"))
+                
+                # Mission 3: Rigid Triggering
+                # If the AI proposed a plan, we ALWAYS show the button, even if commands aren't parsed yet.
+                self.after(0, lambda: self.btn_confirm.pack(fill=tk.X, pady=(0, 10)))
+                self.after(0, lambda: self.log("AI Plan Proposed. Execution Button Enabled.", "SYSTEM"))
             
             if ceil_content:
                 self.pending_instructions = ceil_content
-                self.after(0, lambda: self.btn_confirm.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10))
+                self.after(0, lambda: self.log("AI Instructions Parsed Successfully.", "SUCCESS"))
                 # Only show the confirmation prompt if there are actual commands
                 self.after(0, lambda: self.chat_bubble("AI", "I have prepared the changes. Please review the plan above and click 'CONFIRM & EXECUTE' when ready."))
             
@@ -665,10 +689,13 @@ class SecureIDE(tk.Tk):
 
     def execute_pending(self):
         """Mission 3: The Execution Hook (Async)."""
+        self.btn_confirm.pack_forget()
+        
         if not self.pending_instructions:
+            self.log("No CEIL commands found in the AI response. Please ask the AI to provide the COMMANDS section.", "ERROR")
+            self.chat_bubble("AI", "⚠️ I proposed a plan but didn't provide the execution commands. Please ask me to 'Provide the CEIL commands for this plan' if you want to proceed.")
             return
         
-        self.btn_confirm.pack_forget()
         ceil = self.pending_instructions
         self.pending_instructions = None
         

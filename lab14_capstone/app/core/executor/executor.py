@@ -29,27 +29,35 @@ class CeilExecutor:
                     # Clean the command string
                     raw_cmd = cmd['file'].strip()
                     
-                    # SYSTEM COMMAND DETECTION:
-                    # If it starts with pip, npm, git, etc., run it directly in shell
+                    # Mission 3: Robust RUN Handling
+                    # 1. Handle "python main.py" or "main.py"
+                    if raw_cmd.startswith("python "):
+                        target_file = raw_cmd.replace("python ", "").strip()
+                    elif raw_cmd == "python":
+                        # AI hallucination: wrote 'RUN python' without a file
+                        target_file = "main.py" # Intelligent fallback
+                    else:
+                        target_file = raw_cmd
+                    
+                    # 2. System Command Detection
                     system_verbs = ['pip', 'npm', 'git', 'node', 'npx']
-                    is_system = any(raw_cmd.startswith(v) for v in system_verbs)
+                    is_system = any(target_file.startswith(v) for v in system_verbs)
                     
                     if is_system:
-                        # Run as a shell command directly
-                        res = subprocess.run(raw_cmd, shell=True, capture_output=True, text=True)
-                        results.append(f"SHELL {raw_cmd}: {res.stdout or res.stderr}")
+                        res = subprocess.run(target_file, shell=True, capture_output=True, text=True)
+                        results.append(f"SHELL {target_file}: {res.stdout or res.stderr}")
                     else:
-                        # Standard Python file execution
-                        target_file = raw_cmd.replace('python ', '').strip()
+                        # 3. Resolve Path
                         full_path = os.path.join(self.base_path, target_file)
-                        
-                        # Fallback check if file doesn't exist at path
                         if not os.path.exists(full_path):
-                            # Try just the basename in the root
+                            # Try basename fallback
                             full_path = os.path.join(self.base_path, os.path.basename(target_file))
-                            
-                        res = subprocess.run(['python', full_path], capture_output=True, text=True)
-                        results.append(f"RUN {target_file}: {res.stdout or res.stderr}")
+                        
+                        if os.path.exists(full_path):
+                            res = subprocess.run(['python', full_path], capture_output=True, text=True)
+                            results.append(f"RUN {target_file}: {res.stdout or res.stderr}")
+                        else:
+                            results.append(f"ERROR: File {target_file} not found for RUN.")
                 elif cmd['type'] == 'FETCH_FIGMA':
                     results.append(f"FETCH_FIGMA {cmd['url']}: Data retrieved from Figma.")
             except Exception as e:
